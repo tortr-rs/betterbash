@@ -20,6 +20,8 @@ config.status
 config.cache
 config.log
 
+configure~
+
 autom4te.cache
 
 bash

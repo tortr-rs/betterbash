@@ -2839,7 +2839,7 @@ wait_for_background_pids (struct procstat *ps)
 	  ps->pid = pid;
 	  ps->status = (r < 0 || r > 256) ? 127 : r;
 	}
-      if (r == -1 && errno == ECHILD)
+      if ((r < 0 || r > 256) && errno == ECHILD)
 	{
 	  /* If we're mistaken about job state, compensate. */
 	  check_async = 0;
