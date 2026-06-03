@@ -638,7 +638,10 @@ termsig_handler (int sig)
   interrupt_execution = retain_fifos = executing_funsub = 0;
   comsub_ignore_return = return_catch_flag = wait_intr_flag = 0;
 
-  run_exit_trap ();	/* XXX - run exit trap possibly in signal context? */
+  /* Don't run the exit trap if we're supposed to be ignoring traps in a
+     subshell environment. */
+  if ((subshell_environment & SUBSHELL_IGNTRAP) == 0)
+    run_exit_trap ();	/* XXX - run exit trap possibly in signal context? */
 
   kill_shell (sig);
 }
