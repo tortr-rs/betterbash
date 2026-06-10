@@ -788,8 +788,11 @@ read_builtin (WORD_LIST *list)
 	  char *x;
 	  x = (char *)xrealloc (input_string, size += 128);
 
-	  /* Only need to change unwind-protect if input_string changes */
+#if 0
+	  /* This is, in theory, undefined behavior, since input_string may
+	     have been freed. */
 	  if (x != input_string)
+#endif
 	    {
 	      input_string = x;
 	      remove_unwind_protect ();
