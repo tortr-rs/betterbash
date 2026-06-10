@@ -197,16 +197,16 @@ mapfile (int fd, long line_count_goal, long origin, long nskip, long callback_qu
 	    zsyncfd (fd);
 
 	  run_callback (callback, array_index, line);
+
+	  /* Bad things can happen if the callback modifies ENTRY, e.g.,
+	     unsetting it or changing it to a non-indexed-array type, so we
+	     look it up again every time we need to assign something */
+	  entry = bind_array_variable (array_name, array_index, line, 0);
+	  if (entry == 0 || ASSIGN_DISALLOWED (entry, 0))
+	    return EXECUTION_FAILURE;
 	}
-
-      /* Bad things can happen if the callback modifies ENTRY, e.g.,
-	 unsetting it or changing it to a non-indexed-array type, so we
-	 look it up again every time we need to assign something */
-      entry = bind_array_variable (array_name, array_index, line, 0);
-      if (entry == 0 || ASSIGN_DISALLOWED (entry, 0))
-	return EXECUTION_FAILURE;
-
-      bind_array_element (entry, array_index, line, 0);
+      else
+	bind_array_element (entry, array_index, line, 0);
 
       /* Have we exceeded # of lines to store? */
       line_count++;
