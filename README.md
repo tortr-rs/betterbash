@@ -1,6 +1,6 @@
 # bbash (Better Bash)
 
-bbash is GNU Bash with a small, additive set of clearer-named commands
+bbash (pronpunced behbash)is GNU Bash with a small, additive set of clearer-named commands
 built in. It is a straight fork of the real Bash source tree
 (git.savannah.gnu.org/cgit/bash.git, GPLv3) — currently based on **Bash
 5.3, patch 16**.
