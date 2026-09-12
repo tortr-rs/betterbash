@@ -1,0 +1,169 @@
+This file is clearcmds.def, from which is created clearcmds.c.  It
+implements bbash's additive "clearer name" alias builtins: list, copy,
+move, delete, make-dir, ownership, and word-count.  Each one dispatches
+through to the real, unmodified external command (ls, cp, mv, rm, mkdir,
+chown, wc respectively) via run_real_command() in common.c, exactly the
+way the existing `command' builtin dispatches to an external command with
+function lookup suppressed.  These are brand-new builtin names that do not
+exist in stock Bash, so there is no collision with, or change to, any
+existing command, builtin, or script behavior -- the original external
+commands remain completely unaffected and directly invocable as always.
+
+Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Bash, the Bourne Again SHell.
+
+Bash is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Bash is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Bash.  If not, see <http://www.gnu.org/licenses/>.
+
+$PRODUCES clearcmds.c
+
+$BUILTIN list
+$FUNCTION list_builtin
+$SHORT_DOC list [arg ...]
+Clearer name for `ls'.
+
+Runs the real `ls' command with the given arguments.  bbash additive
+builtin; `ls' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `ls'.
+$END
+
+$BUILTIN copy
+$FUNCTION copy_builtin
+$SHORT_DOC copy [arg ...]
+Clearer name for `cp'.
+
+Runs the real `cp' command with the given arguments.  bbash additive
+builtin; `cp' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `cp'.
+$END
+
+$BUILTIN move
+$FUNCTION move_builtin
+$SHORT_DOC move [arg ...]
+Clearer name for `mv'.
+
+Runs the real `mv' command with the given arguments.  bbash additive
+builtin; `mv' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `mv'.
+$END
+
+$BUILTIN delete
+$FUNCTION delete_builtin
+$SHORT_DOC delete [arg ...]
+Clearer name for `rm'.
+
+Runs the real `rm' command with the given arguments.  bbash additive
+builtin; `rm' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `rm'.
+$END
+
+$BUILTIN make-dir
+$DOCNAME make_dir
+$FUNCTION make_dir_builtin
+$SHORT_DOC make-dir [arg ...]
+Clearer name for `mkdir'.
+
+Runs the real `mkdir' command with the given arguments.  bbash additive
+builtin; `mkdir' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `mkdir'.
+$END
+
+$BUILTIN ownership
+$FUNCTION ownership_builtin
+$SHORT_DOC ownership [arg ...]
+Clearer name for `chown'.
+
+Runs the real `chown' command with the given arguments.  bbash additive
+builtin; `chown' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `chown'.
+$END
+
+$BUILTIN word-count
+$DOCNAME word_count
+$FUNCTION word_count_builtin
+$SHORT_DOC word-count [arg ...]
+Clearer name for `wc'.
+
+Runs the real `wc' command with the given arguments.  bbash additive
+builtin; `wc' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `wc'.
+$END
+
+#include <config.h>
+
+#if defined (HAVE_UNISTD_H)
+#  ifdef _MINIX
+#    include <sys/types.h>
+#  endif
+#  include <unistd.h>
+#endif
+
+#include "../shell.h"
+#include "common.h"
+
+int
+list_builtin (WORD_LIST *list)
+{
+  return run_real_command ("ls", list);
+}
+
+int
+copy_builtin (WORD_LIST *list)
+{
+  return run_real_command ("cp", list);
+}
+
+int
+move_builtin (WORD_LIST *list)
+{
+  return run_real_command ("mv", list);
+}
+
+int
+delete_builtin (WORD_LIST *list)
+{
+  return run_real_command ("rm", list);
+}
+
+int
+make_dir_builtin (WORD_LIST *list)
+{
+  return run_real_command ("mkdir", list);
+}
+
+int
+ownership_builtin (WORD_LIST *list)
+{
+  return run_real_command ("chown", list);
+}
+
+int
+word_count_builtin (WORD_LIST *list)
+{
+  return run_real_command ("wc", list);
+}

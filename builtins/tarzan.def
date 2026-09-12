@@ -1,0 +1,608 @@
+This file is tarzan.def, from which is created tarzan.c.  It implements
+bbash's "tarzan" builtin: a clearer-interface wrapper around tar, backed
+by libarchive so archives are fully standard tar format (with transparent
+gzip/bzip2/xz/zstd compression, auto-detected from the archive itself on
+read and from the output filename's extension on write) -- files created
+by tarzan are byte-compatible with real tar, and real tar/other tools'
+archives extract correctly with tarzan.  This is a brand-new builtin name
+that does not exist in stock Bash and touches no existing command.
+
+Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Bash, the Bourne Again SHell.
+
+Bash is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Bash is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Bash.  If not, see <http://www.gnu.org/licenses/>.
+
+$PRODUCES tarzan.c
+
+$BUILTIN tarzan
+$FUNCTION tarzan_builtin
+$SHORT_DOC tarzan (--create <archive> | --extract | --list) [options] [file ...]
+A clearer-interface wrapper around tar, reading and writing standard tar
+archives (with transparent gzip/bzip2/xz/zstd compression).
+
+Exactly one of the following mode flags is required:
+  -c, --create <archive>       create ARCHIVE from the given files/dirs
+  -x, --extract                extract the archive named by the last
+                                remaining argument
+  -t, --list                   list the archive's contents without
+                                extracting anything
+
+Options:
+  -o, --output <path>          with --extract, directory to extract into
+                                (default: current directory)
+  -q, --quiet                  suppress the normal summary/progress output
+  -v, --verbose                show detailed per-file operations
+  -e, --exclude <pattern>      exclude paths matching PATTERN (glob syntax,
+                                may be given more than once)
+  -p, --preserve-permissions   with --extract, also restore original
+                                ownership (uid/gid) in addition to
+                                permissions (requires appropriate privilege)
+  -L, --follow-symlinks        with --create, store the files symlinks
+                                point to instead of the symlinks themselves
+
+Compression is never chosen with a separate flag: on --create it is picked
+from ARCHIVE's extension (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz,
+.tar.zst/.tzst), and on --extract/--list it is auto-detected from the
+archive's own contents, exactly like the file it names.
+
+Exit Status:
+Returns 0 on success, 1 if the archive could not be read/written or a
+requested path did not exist, 2 on invalid usage.
+$END
+
+#include <config.h>
+
+#if defined (HAVE_UNISTD_H)
+#  ifdef _MINIX
+#    include <sys/types.h>
+#  endif
+#  include <unistd.h>
+#endif
+
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <fnmatch.h>
+#include <archive.h>
+#include <archive_entry.h>
+
+#include "../bashansi.h"
+#include "../bashintl.h"
+#include "../shell.h"
+#include "../execute_cmd.h"
+#include "common.h"
+#include "bashgetopt.h"
+
+#define TZ_MODE_NONE	0
+#define TZ_MODE_CREATE	1
+#define TZ_MODE_EXTRACT	2
+#define TZ_MODE_LIST	3
+
+#define TZ_MAX_EXCLUDES	64
+
+struct tz_opts
+{
+  int mode;
+  int quiet;
+  int verbose;
+  int preserve_perm;
+  int follow_symlinks;
+  char *archive;		/* --create's argument, or the extract/list target */
+  char *output;
+  char *excludes[TZ_MAX_EXCLUDES];
+  int nexcludes;
+};
+
+/* common.c's builtin_error_prolog() is static; reimplement the equivalent
+   "toolname: " prefix here using the public this_command_name, which bash
+   sets to "tarzan" before calling tarzan_builtin(). */
+static void
+tz_error_prolog (void)
+{
+  if (this_command_name && *this_command_name)
+    fprintf (stderr, "%s: ", this_command_name);
+}
+
+/* Print MSG the way `bash: tarzan: MSG' errors are normally printed, then
+   return the given exit status -- used so every failure path gives a
+   clear, specific message instead of silently guessing or crashing. */
+static int
+tz_fail (int status, const char *format, ...)
+{
+  va_list args;
+
+  tz_error_prolog ();
+  va_start (args, format);
+  vfprintf (stderr, format, args);
+  va_end (args);
+  fprintf (stderr, "\n");
+  return status;
+}
+
+static int
+tz_excluded (struct tz_opts *o, const char *path)
+{
+  int i;
+
+  for (i = 0; i < o->nexcludes; i++)
+    if (fnmatch (o->excludes[i], path, 0) == 0)
+      return 1;
+  return 0;
+}
+
+/* Pick a libarchive write filter from ARCHIVE's own extension, so
+   compression is always implicit rather than a separate flag. */
+static int
+tz_set_write_filter (struct archive *a, const char *archive)
+{
+  size_t len = strlen (archive);
+
+#define ENDS(suf) (len >= strlen (suf) && strcmp (archive + len - strlen (suf), suf) == 0)
+
+  if (ENDS (".tar.gz") || ENDS (".tgz"))
+    return archive_write_add_filter_gzip (a);
+  if (ENDS (".tar.bz2") || ENDS (".tbz2"))
+    return archive_write_add_filter_bzip2 (a);
+  if (ENDS (".tar.xz") || ENDS (".txz"))
+    return archive_write_add_filter_xz (a);
+  if (ENDS (".tar.zst") || ENDS (".tzst"))
+    return archive_write_add_filter_zstd (a);
+  return archive_write_add_filter_none (a);
+
+#undef ENDS
+}
+
+static int
+tz_do_create (struct tz_opts *o, WORD_LIST *paths)
+{
+  struct archive *a, *disk;
+  struct archive_entry *entry;
+  WORD_LIST *l;
+  char *path, *displayname;
+  int r, fd, filecount;
+
+  if (paths == 0)
+    return tz_fail (EXECUTION_FAILURE, _("--create requires at least one file or directory to archive"));
+
+  a = archive_write_new ();
+  if (tz_set_write_filter (a, o->archive) != ARCHIVE_OK)
+    {
+      tz_fail (EXECUTION_FAILURE, "%s", archive_error_string (a));
+      archive_write_free (a);
+      return EXECUTION_FAILURE;
+    }
+  archive_write_set_format_pax_restricted (a);
+
+  if (archive_write_open_filename (a, o->archive) != ARCHIVE_OK)
+    {
+      tz_fail (EXECUTION_FAILURE, "%s: %s", o->archive, archive_error_string (a));
+      archive_write_free (a);
+      return EXECUTION_FAILURE;
+    }
+
+  disk = archive_read_disk_new ();
+  archive_read_disk_set_standard_lookup (disk);
+  if (o->follow_symlinks)
+    archive_read_disk_set_symlink_logical (disk);
+  else
+    archive_read_disk_set_symlink_physical (disk);
+
+  filecount = 0;
+
+  for (l = paths; l; l = l->next)
+    {
+      path = l->word->word;
+
+      /* Strip repeated leading slashes the same way real tar warns about
+	 and normalizes an absolute member name, so archives stay relocatable. */
+      displayname = path;
+      if (*displayname == '/')
+	{
+	  builtin_warning (_("removing leading '/' from member names"));
+	  while (*displayname == '/')
+	    displayname++;
+	  if (*displayname == '\0')
+	    continue;
+	}
+
+      if (archive_read_disk_open (disk, path) != ARCHIVE_OK)
+	{
+	  tz_fail (EXECUTION_FAILURE, "%s: %s", path, archive_error_string (disk));
+	  archive_read_close (disk);
+	  archive_read_free (disk);
+	  archive_write_close (a);
+	  archive_write_free (a);
+	  return EXECUTION_FAILURE;
+	}
+
+      for (;;)
+	{
+	  entry = archive_entry_new ();
+	  r = archive_read_next_header2 (disk, entry);
+	  if (r == ARCHIVE_EOF)
+	    {
+	      archive_entry_free (entry);
+	      break;
+	    }
+	  if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+	    {
+	      tz_fail (EXECUTION_FAILURE, "%s: %s", path, archive_error_string (disk));
+	      archive_entry_free (entry);
+	      archive_read_close (disk);
+	      archive_read_free (disk);
+	      archive_write_close (a);
+	      archive_write_free (a);
+	      return EXECUTION_FAILURE;
+	    }
+
+	  archive_read_disk_descend (disk);
+
+	  if (path != displayname)
+	    {
+	      const char *ename = archive_entry_pathname (entry);
+	      /* ename begins with PATH; splice in DISPLAYNAME instead. */
+	      size_t plen = strlen (path);
+	      if (strncmp (ename, path, plen) == 0)
+		{
+		  char *newname;
+		  if (asprintf (&newname, "%s%s", displayname, ename + plen) >= 0)
+		    {
+		      archive_entry_set_pathname (entry, newname);
+		      free (newname);
+		    }
+		}
+	    }
+
+	  if (tz_excluded (o, archive_entry_pathname (entry)))
+	    {
+	      if (o->verbose && !o->quiet)
+		fprintf (stderr, _("tarzan: excluding %s\n"), archive_entry_pathname (entry));
+	      archive_entry_free (entry);
+	      continue;
+	    }
+
+	  if (o->verbose && !o->quiet)
+	    fprintf (stderr, "%s\n", archive_entry_pathname (entry));
+
+	  if (archive_write_header (a, entry) != ARCHIVE_OK)
+	    {
+	      tz_fail (EXECUTION_FAILURE, "%s: %s", archive_entry_pathname (entry), archive_error_string (a));
+	      archive_entry_free (entry);
+	      archive_read_close (disk);
+	      archive_read_free (disk);
+	      archive_write_close (a);
+	      archive_write_free (a);
+	      return EXECUTION_FAILURE;
+	    }
+
+	  if (archive_entry_size (entry) > 0 && archive_entry_filetype (entry) == AE_IFREG)
+	    {
+	      fd = open (archive_entry_sourcepath (entry), O_RDONLY);
+	      if (fd >= 0)
+		{
+		  char buf[65536];
+		  ssize_t n;
+		  while ((n = read (fd, buf, sizeof (buf))) > 0)
+		    archive_write_data (a, buf, (size_t)n);
+		  close (fd);
+		}
+	    }
+
+	  archive_write_finish_entry (a);
+	  archive_entry_free (entry);
+	  filecount++;
+	}
+
+      archive_read_close (disk);
+    }
+
+  archive_read_free (disk);
+  archive_write_close (a);
+  archive_write_free (a);
+
+  if (!o->quiet)
+    fprintf (stderr, _("tarzan: created %s (%d entr%s)\n"), o->archive, filecount, filecount == 1 ? "y" : "ies");
+
+  return EXECUTION_SUCCESS;
+}
+
+static la_ssize_t
+tz_copy_data (struct archive *ar, struct archive *aw)
+{
+  const void *buf;
+  size_t size;
+  la_int64_t offset;
+  int r;
+
+  for (;;)
+    {
+      r = archive_read_data_block (ar, &buf, &size, &offset);
+      if (r == ARCHIVE_EOF)
+	return ARCHIVE_OK;
+      if (r != ARCHIVE_OK)
+	return r;
+      r = archive_write_data_block (aw, buf, size, offset);
+      if (r != ARCHIVE_OK)
+	return r;
+    }
+}
+
+static int
+tz_do_extract (struct tz_opts *o)
+{
+  struct archive *a, *ext;
+  struct archive_entry *entry;
+  int r, flags, filecount;
+
+  a = archive_read_new ();
+  archive_read_support_filter_all (a);
+  archive_read_support_format_all (a);
+
+  if (archive_read_open_filename (a, o->archive, 10240) != ARCHIVE_OK)
+    {
+      tz_fail (EXECUTION_FAILURE, _("%s: not a valid archive, or its compression could not be detected (%s)"),
+	       o->archive, archive_error_string (a));
+      archive_read_free (a);
+      return EXECUTION_FAILURE;
+    }
+
+  flags = ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_FFLAGS
+	  | ARCHIVE_EXTRACT_SECURE_SYMLINKS | ARCHIVE_EXTRACT_SECURE_NODOTDOT | ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS;
+  if (o->preserve_perm)
+    flags |= ARCHIVE_EXTRACT_OWNER;
+
+  ext = archive_write_disk_new ();
+  archive_write_disk_set_options (ext, flags);
+  archive_write_disk_set_standard_lookup (ext);
+
+  filecount = 0;
+
+  for (;;)
+    {
+      r = archive_read_next_header (a, &entry);
+      if (r == ARCHIVE_EOF)
+	break;
+      if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+	{
+	  tz_fail (EXECUTION_FAILURE, _("%s: damaged or invalid archive (%s)"), o->archive, archive_error_string (a));
+	  archive_read_close (a);
+	  archive_read_free (a);
+	  archive_write_close (ext);
+	  archive_write_free (ext);
+	  return EXECUTION_FAILURE;
+	}
+
+      if (tz_excluded (o, archive_entry_pathname (entry)))
+	{
+	  if (o->verbose && !o->quiet)
+	    fprintf (stderr, _("tarzan: excluding %s\n"), archive_entry_pathname (entry));
+	  archive_read_data_skip (a);
+	  continue;
+	}
+
+      if (o->output)
+	{
+	  char *joined;
+	  if (asprintf (&joined, "%s/%s", o->output, archive_entry_pathname (entry)) >= 0)
+	    {
+	      archive_entry_set_pathname (entry, joined);
+	      free (joined);
+	    }
+	}
+
+      if (o->verbose && !o->quiet)
+	fprintf (stderr, "%s\n", archive_entry_pathname (entry));
+
+      r = archive_write_header (ext, entry);
+      if (r != ARCHIVE_OK)
+	tz_fail (EXECUTION_FAILURE, "%s: %s", archive_entry_pathname (entry), archive_error_string (ext));
+      else if (archive_entry_size (entry) > 0)
+	{
+	  r = tz_copy_data (a, ext);
+	  if (r != ARCHIVE_OK)
+	    tz_fail (EXECUTION_FAILURE, "%s: %s", archive_entry_pathname (entry), archive_error_string (ext));
+	}
+
+      archive_write_finish_entry (ext);
+      filecount++;
+    }
+
+  archive_read_close (a);
+  archive_read_free (a);
+  archive_write_close (ext);
+  archive_write_free (ext);
+
+  if (!o->quiet)
+    fprintf (stderr, _("tarzan: extracted %d entr%s from %s%s%s\n"), filecount, filecount == 1 ? "y" : "ies",
+	     o->archive, o->output ? _(" to ") : "", o->output ? o->output : "");
+
+  return EXECUTION_SUCCESS;
+}
+
+static int
+tz_do_list (struct tz_opts *o)
+{
+  struct archive *a;
+  struct archive_entry *entry;
+  const struct stat *st;
+  int r;
+
+  a = archive_read_new ();
+  archive_read_support_filter_all (a);
+  archive_read_support_format_all (a);
+
+  if (archive_read_open_filename (a, o->archive, 10240) != ARCHIVE_OK)
+    {
+      tz_fail (EXECUTION_FAILURE, _("%s: not a valid archive, or its compression could not be detected (%s)"),
+	       o->archive, archive_error_string (a));
+      archive_read_free (a);
+      return EXECUTION_FAILURE;
+    }
+
+  for (;;)
+    {
+      r = archive_read_next_header (a, &entry);
+      if (r == ARCHIVE_EOF)
+	break;
+      if (r != ARCHIVE_OK && r != ARCHIVE_WARN)
+	{
+	  tz_fail (EXECUTION_FAILURE, _("%s: damaged or invalid archive (%s)"), o->archive, archive_error_string (a));
+	  archive_read_free (a);
+	  return EXECUTION_FAILURE;
+	}
+
+      if (tz_excluded (o, archive_entry_pathname (entry)))
+	{
+	  archive_read_data_skip (a);
+	  continue;
+	}
+
+      if (o->verbose)
+	{
+	  st = archive_entry_stat (entry);
+	  printf ("%s %8jd %s\n", archive_entry_strmode (entry),
+		  (intmax_t) (st ? st->st_size : archive_entry_size (entry)),
+		  archive_entry_pathname (entry));
+	}
+      else
+	printf ("%s\n", archive_entry_pathname (entry));
+
+      archive_read_data_skip (a);
+    }
+
+  archive_read_close (a);
+  archive_read_free (a);
+  return EXECUTION_SUCCESS;
+}
+
+int
+tarzan_builtin (WORD_LIST *list)
+{
+  struct tz_opts o;
+  WORD_LIST *l, *rest;
+  char *w;
+  int result;
+
+  memset (&o, 0, sizeof (o));
+  rest = (WORD_LIST *)NULL;
+
+  for (l = list; l; l = l->next)
+    {
+      w = l->word->word;
+
+      if (STREQ (w, "--"))
+	{
+	  for (l = l->next; l; l = l->next)
+	    rest = make_word_list (make_word (l->word->word), rest);
+	  break;
+	}
+      else if (STREQ (w, "--create") || STREQ (w, "-c"))
+	{
+	  if (o.mode)
+	    return tz_fail (EX_USAGE, _("only one of --create, --extract, or --list may be given"));
+	  if (l->next == 0)
+	    { sh_needarg (w); return EX_USAGE; }
+	  l = l->next;
+	  o.mode = TZ_MODE_CREATE;
+	  o.archive = l->word->word;
+	}
+      else if (STREQ (w, "--extract") || STREQ (w, "-x"))
+	{
+	  if (o.mode)
+	    return tz_fail (EX_USAGE, _("only one of --create, --extract, or --list may be given"));
+	  o.mode = TZ_MODE_EXTRACT;
+	}
+      else if (STREQ (w, "--list") || STREQ (w, "-t"))
+	{
+	  if (o.mode)
+	    return tz_fail (EX_USAGE, _("only one of --create, --extract, or --list may be given"));
+	  o.mode = TZ_MODE_LIST;
+	}
+      else if (STREQ (w, "--output") || STREQ (w, "-o"))
+	{
+	  if (l->next == 0)
+	    { sh_needarg (w); return EX_USAGE; }
+	  l = l->next;
+	  o.output = l->word->word;
+	}
+      else if (STREQ (w, "--exclude") || STREQ (w, "-e"))
+	{
+	  if (l->next == 0)
+	    { sh_needarg (w); return EX_USAGE; }
+	  l = l->next;
+	  if (o.nexcludes >= TZ_MAX_EXCLUDES)
+	    return tz_fail (EX_USAGE, _("too many --exclude patterns (max %d)"), TZ_MAX_EXCLUDES);
+	  o.excludes[o.nexcludes++] = l->word->word;
+	}
+      else if (STREQ (w, "--quiet") || STREQ (w, "-q"))
+	o.quiet = 1;
+      else if (STREQ (w, "--verbose") || STREQ (w, "-v"))
+	o.verbose = 1;
+      else if (STREQ (w, "--preserve-permissions") || STREQ (w, "-p"))
+	o.preserve_perm = 1;
+      else if (STREQ (w, "--follow-symlinks") || STREQ (w, "-L"))
+	o.follow_symlinks = 1;
+      else if (STREQ (w, "--help") || STREQ (w, "-h"))
+	{
+	  builtin_help ();
+	  return EX_USAGE;
+	}
+      else if (*w == '-' && w[1] != '\0')
+	{
+	  sh_invalidopt (w);
+	  builtin_usage ();
+	  return EX_USAGE;
+	}
+      else
+	rest = make_word_list (make_word (w), rest);
+    }
+
+  rest = REVERSE_LIST (rest, WORD_LIST *);
+
+  if (o.quiet && o.verbose)
+    return tz_fail (EX_USAGE, _("--quiet and --verbose are mutually exclusive"));
+
+  if (o.mode == TZ_MODE_NONE)
+    return tz_fail (EX_USAGE, _("exactly one of --create, --extract, or --list is required"));
+
+  if (o.mode == TZ_MODE_CREATE)
+    {
+      if (o.output)
+	return tz_fail (EX_USAGE, _("--output is not valid with --create; give the archive name to --create itself"));
+      result = tz_do_create (&o, rest);
+    }
+  else
+    {
+      if (rest == 0 || rest->next != 0)
+	return tz_fail (EX_USAGE, _("%s requires exactly one archive argument"),
+			 o.mode == TZ_MODE_EXTRACT ? "--extract" : "--list");
+      o.archive = rest->word->word;
+
+      if (o.mode == TZ_MODE_EXTRACT)
+	result = tz_do_extract (&o);
+      else
+	{
+	  if (o.output)
+	    return tz_fail (EX_USAGE, _("--output is not valid with --list"));
+	  result = tz_do_list (&o);
+	}
+    }
+
+  dispose_words (rest);
+  return result;
+}

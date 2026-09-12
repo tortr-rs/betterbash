@@ -195,6 +195,13 @@ extern void set_compatibility_opts (void);
 /* Functions from type.def */
 extern int describe_command (char *, int);
 
+/* Run REALNAME as a simple command with ARGS, exactly as if REALNAME had
+   been typed by the user in place of a bbash clearer-name alias builtin.
+   Used by clearcmds.def to implement additive alias builtins (list, copy,
+   move, delete, make-dir, ownership, word-count) that dispatch through to
+   the real external command via the normal simple-command execution path. */
+extern int run_real_command (const char *, WORD_LIST *);
+
 /* Functions from setattr.def */
 extern int set_or_show_attributes (WORD_LIST *, int, int);
 extern int show_all_var_attributes (int, int);
