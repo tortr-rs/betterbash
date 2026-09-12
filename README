@@ -146,4 +146,4 @@ nothing matched, `2` on a bad pattern, bad usage, or an unreadable file.
 - Source layout: the new commands live in `builtins/clearcmds.def`,
   `builtins/tarzan.def`, and `builtins/seek.def`, following the same
   `.def` → generated `.c` convention as every other Bash builtin.
-##cheers @tortr-rs
+## cheers @tortr-rs
