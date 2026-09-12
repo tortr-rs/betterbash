@@ -1081,3 +1081,45 @@ set_expand_once (int nval, int uwp)
   return oa;
 }
 #endif
+
+/* **************************************************************** */
+/*								    */
+/*	  bbash clearer-name alias builtin dispatch helper	    */
+/*								    */
+/* **************************************************************** */
+
+/* Run REALNAME with ARGS exactly as if the user had typed REALNAME in
+   place of the alias builtin name.  Builds a fresh simple-command COMMAND
+   whose first word is REALNAME followed by a copy of ARGS, and hands it to
+   execute_command () -- the same code path command_builtin() (command.def)
+   uses to run COMMAND with function lookup suppressed.  Any redirections
+   attached to the original alias-builtin invocation have already been
+   applied to the current process's file descriptors by the time a builtin
+   function runs, so they carry over to this inner command unchanged. */
+int
+run_real_command (const char *realname, WORD_LIST *args)
+{
+  COMMAND *command;
+  WORD_LIST *words;
+  int result;
+
+  words = make_word_list (make_word (realname), copy_word_list (args));
+
+#define RUN_REAL_COMMAND_FLAGS (CMD_NO_FUNCTIONS | CMD_INHIBIT_EXPANSION | CMD_COMMAND_BUILTIN)
+
+  command = make_bare_simple_command (line_number);
+  command->value.Simple->words = words;
+  command->value.Simple->redirects = (REDIRECT *)NULL;
+  command->flags |= RUN_REAL_COMMAND_FLAGS;
+  command->value.Simple->flags |= RUN_REAL_COMMAND_FLAGS;
+
+  begin_unwind_frame ("run_real_command");
+  add_unwind_protect (uw_dispose_command, command);
+
+  result = execute_command (command);
+
+  dispose_command (command);
+  discard_unwind_frame ("run_real_command");
+
+  return result;
+}

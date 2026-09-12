@@ -145,7 +145,7 @@ LOCAL_DEFS = @LOCAL_DEFS@
 LOCALE_DEFS = -DLOCALEDIR='"$(localedir)"' -DPACKAGE='"$(PACKAGE)"'
 
 LOCAL_LIBS = @LOCAL_LIBS@
-LIBS = $(BUILTINS_LIB) $(LIBRARIES) @LIBS@
+LIBS = $(BUILTINS_LIB) $(LIBRARIES) @LIBS@ -larchive
 LIBS_FOR_BUILD = 
 
 STATIC_LD = @STATIC_LD@
@@ -555,7 +555,8 @@ BUILTIN_DEFS = $(DEFSRC)/alias.def $(DEFSRC)/bind.def $(DEFSRC)/break.def \
 	       $(DEFSRC)/ulimit.def $(DEFSRC)/umask.def $(DEFSRC)/wait.def \
 	       $(DEFSRC)/getopts.def $(DEFSRC)/reserved.def \
 	       $(DEFSRC)/pushd.def $(DEFSRC)/shopt.def $(DEFSRC)/printf.def \
-	       $(DEFSRC)/mapfile.def
+	       $(DEFSRC)/mapfile.def \
+	       $(DEFSRC)/clearcmds.def $(DEFSRC)/tarzan.def $(DEFSRC)/seek.def
 BUILTIN_C_SRC  = $(DEFSRC)/mkbuiltins.c $(DEFSRC)/common.c \
 		 $(DEFSRC)/evalstring.c $(DEFSRC)/evalfile.c \
 		 $(DEFSRC)/bashgetopt.c $(GETOPT_SOURCE)

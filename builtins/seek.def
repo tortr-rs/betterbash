@@ -1,0 +1,534 @@
+This file is seek.def, from which is created seek.c.  It implements
+bbash's "seek" builtin: a clearer-interface wrapper around grep, backed by
+POSIX regcomp/regexec (glibc's regex engine) so the matching power is the
+same real basic/extended regex support grep itself uses -- the interface
+gets simpler, not the matching engine.  This is a brand-new builtin name
+that does not exist in stock Bash and touches no existing command.
+
+Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Bash, the Bourne Again SHell.
+
+Bash is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Bash is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Bash.  If not, see <http://www.gnu.org/licenses/>.
+
+$PRODUCES seek.c
+
+$BUILTIN seek
+$FUNCTION seek_builtin
+$SHORT_DOC seek --pattern <regex> [options] [file ...]
+A clearer-interface wrapper around grep.
+
+  -p, --pattern <regex>        the search pattern (extended regex by
+                                default; see --basic-regex)
+  -r, --recursive              search a directory tree (default: `.' if
+                                no file/directory is given)
+  -i, --ignore-case            case-insensitive match
+  -v, --invert                 show lines that do NOT match
+  -c, --count                  show only a count of matches per file
+  -n, --line-numbers           show line numbers (on by default; negate
+                                with --no-line-numbers)
+      --no-line-numbers        don't show line numbers
+  -l, --files-only             list matching filenames only
+  -C, --context <n>            show N lines of context around each match
+  -G, --basic-regex            use POSIX basic regex syntax instead of
+                                extended (like grep vs. grep -E)
+      --color                  force match highlighting on
+      --no-color                force match highlighting off
+
+With no file operand and --recursive not given, reads standard input.
+
+When standard output is a terminal, matches are grouped per file with
+highlighted matches; otherwise (e.g. when piped) output is one
+`path:line:text' per match, unhighlighted, for easy use with other tools.
+
+Exit Status:
+0 if a match was found, 1 if no lines matched, 2 on invalid usage, a bad
+pattern, or a file that could not be read.
+$END
+
+#include <config.h>
+
+#if defined (HAVE_UNISTD_H)
+#  ifdef _MINIX
+#    include <sys/types.h>
+#  endif
+#  include <unistd.h>
+#endif
+
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include <regex.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#include "../bashansi.h"
+#include "../bashintl.h"
+#include "../shell.h"
+#include "../execute_cmd.h"
+#include "common.h"
+#include "bashgetopt.h"
+
+#define SEEK_COLOR_AUTO		0
+#define SEEK_COLOR_ALWAYS	1
+#define SEEK_COLOR_NEVER	2
+
+#define COL_RESET	"\033[0m"
+#define COL_FILENAME	"\033[1;35m"
+#define COL_LINENO	"\033[32m"
+#define COL_MATCH	"\033[1;31m"
+
+struct seek_opts
+{
+  regex_t re;
+  int ignore_case;
+  int invert;
+  int count_only;
+  int line_numbers;
+  int files_only;
+  int recursive;
+  int context;
+  int basic_regex;
+  int color_mode;
+  int use_color;		/* resolved from color_mode + isatty */
+  int grouped;			/* resolved from isatty (pretty vs. pipe-friendly) */
+  int multi_file;		/* more than one file/recursive: show names */
+  char *pattern;
+  int any_match;
+  int any_error;
+};
+
+#define SEEK_LINE_CHUNK	4096
+
+static void
+seek_error (const char *format, ...)
+{
+  va_list args;
+
+  if (this_command_name && *this_command_name)
+    fprintf (stderr, "%s: ", this_command_name);
+  va_start (args, format);
+  vfprintf (stderr, format, args);
+  va_end (args);
+  fprintf (stderr, "\n");
+}
+
+/* Does LINE match the compiled pattern at all?  Used for filtering
+   (invert/count/files-only) independent of highlighting. */
+static int
+seek_line_matches (struct seek_opts *o, const char *line)
+{
+  regmatch_t pm;
+  return (regexec (&o->re, line, 1, &pm, 0) == 0);
+}
+
+/* Print LINE (no trailing newline in LINE) with every match highlighted,
+   the way `grep --color' highlights all occurrences on a line. */
+static void
+seek_print_highlighted (struct seek_opts *o, const char *line)
+{
+  const char *cursor;
+  regmatch_t pm;
+  int eflags;
+
+  cursor = line;
+  eflags = 0;
+  while (*cursor && regexec (&o->re, cursor, 1, &pm, eflags) == 0)
+    {
+      fwrite (cursor, 1, pm.rm_so, stdout);
+      fputs (COL_MATCH, stdout);
+      fwrite (cursor + pm.rm_so, 1, pm.rm_eo - pm.rm_so, stdout);
+      fputs (COL_RESET, stdout);
+      if (pm.rm_eo == pm.rm_so)
+	{
+	  if (cursor[pm.rm_eo] == '\0')
+	    break;
+	  fputc (cursor[pm.rm_eo], stdout);
+	  cursor += pm.rm_eo + 1;
+	}
+      else
+	cursor += pm.rm_eo;
+      eflags = REG_NOTBOL;
+    }
+  fputs (cursor, stdout);
+}
+
+/* Print one output line (match or context) in whichever of the two
+   layouts is active.  Grouped (tty) layout: a right-aligned colored line
+   number, two-space indent, no filename (the group header already gave
+   it).  Plain (piped) layout: classic `file:line:text' / `file-line-text',
+   self-contained per line so cut/awk/etc. still work on it. */
+static void
+seek_emit (struct seek_opts *o, const char *displayname, long lineno, const char *text, int is_match)
+{
+  if (o->grouped)
+    {
+      if (o->line_numbers)
+	printf (COL_LINENO "%6ld" COL_RESET "  ", lineno);
+      else
+	fputs ("  ", stdout);
+    }
+  else
+    {
+      char sep = is_match ? ':' : '-';
+      if (o->line_numbers)
+	printf ("%s%c%ld%c", displayname, sep, lineno, sep);
+      else
+	printf ("%s%c", displayname, sep);
+    }
+
+  if (is_match && o->use_color)
+    seek_print_highlighted (o, text);
+  else
+    fputs (text, stdout);
+  fputc ('\n', stdout);
+}
+
+struct seek_ctxline
+{
+  char *text;
+  long lineno;
+};
+
+/* Search one already-opened stream.  DISPLAYNAME is what gets shown to the
+   user (may differ from PATH for stdin).  Returns 1 if any match/context
+   line was printed, matching seek_search_file()'s bookkeeping needs. */
+static int
+seek_search_stream (struct seek_opts *o, FILE *fp, const char *displayname)
+{
+  char *line;
+  size_t linecap;
+  ssize_t linelen;
+  long lineno;
+  int matched, header_printed, matchcount;
+  long last_printed_line;
+  struct seek_ctxline *before;
+  int before_cap, before_count, before_head;
+  int after_remaining;
+  int checked_binary, is_binary;
+  int i, idx;
+
+  line = NULL;
+  linecap = 0;
+  lineno = 0;
+  header_printed = 0;
+  matchcount = 0;
+  last_printed_line = -1;
+  after_remaining = 0;
+  checked_binary = is_binary = 0;
+
+  before_cap = (o->context > 0) ? o->context : 0;
+  before = before_cap ? (struct seek_ctxline *)xmalloc (before_cap * sizeof (struct seek_ctxline)) : NULL;
+  for (i = 0; i < before_cap; i++)
+    before[i].text = NULL;
+  before_count = before_head = 0;
+
+  while ((linelen = getline (&line, &linecap, fp)) != -1)
+    {
+      lineno++;
+      if (linelen > 0 && line[linelen - 1] == '\n')
+	line[linelen - 1] = '\0';
+
+      if (!checked_binary)
+	{
+	  checked_binary = 1;
+	  if (linelen > 1 && memchr (line, '\0', (size_t)(linelen - 1)))
+	    is_binary = 1;
+	}
+
+      matched = seek_line_matches (o, line);
+      if (o->invert)
+	matched = !matched;
+
+      if (matched)
+	{
+	  o->any_match = 1;
+	  matchcount++;
+
+	  if (is_binary && !o->count_only && !o->files_only)
+	    {
+	      printf (_("binary file %s matches\n"), displayname);
+	      free (line);
+	      for (i = 0; i < before_cap; i++)
+		free (before[i].text);
+	      if (before) free (before);
+	      return 1;
+	    }
+
+	  if (o->files_only)
+	    {
+	      printf ("%s\n", displayname);
+	      free (line);
+	      for (i = 0; i < before_cap; i++)
+		free (before[i].text);
+	      if (before) free (before);
+	      return 1;
+	    }
+
+	  if (!o->count_only)
+	    {
+	      if (o->grouped && o->multi_file && !header_printed)
+		{
+		  if (o->use_color)
+		    printf (COL_FILENAME "%s" COL_RESET "\n", displayname);
+		  else
+		    printf ("%s\n", displayname);
+		  header_printed = 1;
+		}
+
+	      /* Flush pending before-context, with a `--' separator if this
+		 match isn't contiguous with whatever we last printed. */
+	      if (before_count > 0)
+		{
+		  if (last_printed_line >= 0 && before[(before_head - before_count + before_cap) % before_cap].lineno != last_printed_line + 1)
+		    printf ("--\n");
+		  for (i = 0; i < before_count; i++)
+		    {
+		      idx = (before_head - before_count + i + before_cap) % before_cap;
+		      seek_emit (o, displayname, before[idx].lineno, before[idx].text, 0);
+		      last_printed_line = before[idx].lineno;
+		    }
+		}
+	      else if (last_printed_line >= 0 && lineno != last_printed_line + 1 && o->context > 0)
+		printf ("--\n");
+
+	      seek_emit (o, displayname, lineno, line, 1);
+	      last_printed_line = lineno;
+	      after_remaining = o->context;
+	    }
+	  before_count = 0;
+	}
+      else if (!o->count_only && !o->files_only)
+	{
+	  if (after_remaining > 0)
+	    {
+	      seek_emit (o, displayname, lineno, line, 0);
+	      last_printed_line = lineno;
+	      after_remaining--;
+	    }
+	  else if (before_cap > 0)
+	    {
+	      idx = before_head % before_cap;
+	      free (before[idx].text);
+	      before[idx].text = savestring (line);
+	      before[idx].lineno = lineno;
+	      before_head = (before_head + 1) % before_cap;
+	      if (before_count < before_cap)
+		before_count++;
+	    }
+	}
+    }
+
+  free (line);
+  for (i = 0; i < before_cap; i++)
+    free (before[i].text);
+  if (before)
+    free (before);
+
+  if (o->count_only)
+    {
+      if (o->multi_file)
+	printf ("%s:%d\n", displayname, matchcount);
+      else
+	printf ("%d\n", matchcount);
+      if (matchcount > 0)
+	o->any_match = 1;
+    }
+
+  return matchcount > 0;
+}
+
+static void
+seek_search_file (struct seek_opts *o, const char *path)
+{
+  FILE *fp;
+
+  fp = fopen (path, "r");
+  if (fp == NULL)
+    {
+      seek_error ("%s: %s", path, strerror (errno));
+      o->any_error = 1;
+      return;
+    }
+  seek_search_stream (o, fp, path);
+  fclose (fp);
+}
+
+static void
+seek_walk (struct seek_opts *o, const char *path)
+{
+  struct stat st;
+  DIR *dp;
+  struct dirent *de;
+  char *child;
+
+  if (lstat (path, &st) != 0)
+    {
+      seek_error ("%s: %s", path, strerror (errno));
+      o->any_error = 1;
+      return;
+    }
+
+  if (S_ISLNK (st.st_mode))
+    return;			/* don't follow symlinks while recursing */
+
+  if (S_ISDIR (st.st_mode))
+    {
+      dp = opendir (path);
+      if (dp == NULL)
+	{
+	  seek_error ("%s: %s", path, strerror (errno));
+	  o->any_error = 1;
+	  return;
+	}
+      while ((de = readdir (dp)) != NULL)
+	{
+	  if (STREQ (de->d_name, ".") || STREQ (de->d_name, ".."))
+	    continue;
+	  if (asprintf (&child, "%s/%s", path, de->d_name) < 0)
+	    continue;
+	  seek_walk (o, child);
+	  free (child);
+	}
+      closedir (dp);
+    }
+  else if (S_ISREG (st.st_mode))
+    seek_search_file (o, path);
+}
+
+int
+seek_builtin (WORD_LIST *list)
+{
+  struct seek_opts o;
+  WORD_LIST *l, *files;
+  char *w;
+  int cflags, r;
+  char errbuf[256];
+
+  memset (&o, 0, sizeof (o));
+  o.line_numbers = 1;		/* on by default, per design: almost always wanted */
+  o.color_mode = SEEK_COLOR_AUTO;
+  files = (WORD_LIST *)NULL;
+
+  for (l = list; l; l = l->next)
+    {
+      w = l->word->word;
+
+      if (STREQ (w, "--"))
+	{
+	  for (l = l->next; l; l = l->next)
+	    files = make_word_list (make_word (l->word->word), files);
+	  break;
+	}
+      else if (STREQ (w, "--pattern") || STREQ (w, "-p"))
+	{
+	  if (l->next == 0)
+	    { sh_needarg (w); return EX_USAGE; }
+	  l = l->next;
+	  o.pattern = l->word->word;
+	}
+      else if (STREQ (w, "--recursive") || STREQ (w, "-r"))
+	o.recursive = 1;
+      else if (STREQ (w, "--ignore-case") || STREQ (w, "-i"))
+	o.ignore_case = 1;
+      else if (STREQ (w, "--invert") || STREQ (w, "-v"))
+	o.invert = 1;
+      else if (STREQ (w, "--count") || STREQ (w, "-c"))
+	o.count_only = 1;
+      else if (STREQ (w, "--line-numbers") || STREQ (w, "-n"))
+	o.line_numbers = 1;
+      else if (STREQ (w, "--no-line-numbers"))
+	o.line_numbers = 0;
+      else if (STREQ (w, "--files-only") || STREQ (w, "-l"))
+	o.files_only = 1;
+      else if (STREQ (w, "--basic-regex") || STREQ (w, "-G"))
+	o.basic_regex = 1;
+      else if (STREQ (w, "--color"))
+	o.color_mode = SEEK_COLOR_ALWAYS;
+      else if (STREQ (w, "--no-color"))
+	o.color_mode = SEEK_COLOR_NEVER;
+      else if (STREQ (w, "--context") || STREQ (w, "-C"))
+	{
+	  if (l->next == 0)
+	    { sh_needarg (w); return EX_USAGE; }
+	  l = l->next;
+	  o.context = atoi (l->word->word);
+	  if (o.context < 0)
+	    o.context = 0;
+	}
+      else if (STREQ (w, "--help") || STREQ (w, "-h"))
+	{
+	  builtin_help ();
+	  return EX_USAGE;
+	}
+      else if (*w == '-' && w[1] != '\0')
+	{
+	  sh_invalidopt (w);
+	  builtin_usage ();
+	  return EX_USAGE;
+	}
+      else
+	files = make_word_list (make_word (w), files);
+    }
+
+  files = REVERSE_LIST (files, WORD_LIST *);
+
+  if (o.pattern == NULL)
+    {
+      seek_error (_("--pattern is required"));
+      dispose_words (files);
+      return EX_USAGE;
+    }
+
+  cflags = (o.basic_regex ? 0 : REG_EXTENDED) | (o.ignore_case ? REG_ICASE : 0);
+  r = regcomp (&o.re, o.pattern, cflags);
+  if (r != 0)
+    {
+      regerror (r, &o.re, errbuf, sizeof (errbuf));
+      seek_error (_("invalid pattern: %s"), errbuf);
+      dispose_words (files);
+      return EX_USAGE;
+    }
+
+  o.use_color = (o.color_mode == SEEK_COLOR_ALWAYS) ||
+		(o.color_mode == SEEK_COLOR_AUTO && isatty (STDOUT_FILENO));
+  o.grouped = isatty (STDOUT_FILENO);
+
+  if (files == 0 && o.recursive)
+    files = make_word_list (make_word ("."), (WORD_LIST *)NULL);
+
+  o.multi_file = o.recursive || (files && files->next);
+
+  if (files == 0)
+    seek_search_stream (&o, stdin, _("(standard input)"));
+  else
+    {
+      for (l = files; l; l = l->next)
+	{
+	  if (o.recursive)
+	    seek_walk (&o, l->word->word);
+	  else
+	    seek_search_file (&o, l->word->word);
+	}
+    }
+
+  regfree (&o.re);
+  dispose_words (files);
+
+  if (o.any_error)
+    return 2;
+  return o.any_match ? EXECUTION_SUCCESS : EXECUTION_FAILURE;
+}
