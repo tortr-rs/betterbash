@@ -56,6 +56,15 @@ exactly as before.
 | `make-dir`     | `mkdir`      |
 | `ownership`    | `chown`      |
 | `word-count`   | `wc`         |
+| `link`         | `ln`         |
+| `disk-usage`   | `du`         |
+| `disk-free`    | `df`         |
+| `processes`    | `ps`         |
+| `permissions`  | `chmod`      |
+| `stop-process` | `kill`       |
+
+`stop-process` dispatches to the shell's own `kill` builtin (not an
+external binary), so job specs like `%1` still work as expected.
 
 ```sh
 list -la /tmp
