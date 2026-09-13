@@ -114,6 +114,82 @@ Exit Status:
 Returns the exit status of `wc'.
 $END
 
+$BUILTIN link
+$FUNCTION link_builtin
+$SHORT_DOC link [arg ...]
+Clearer name for `ln'.
+
+Runs the real `ln' command with the given arguments.  bbash additive
+builtin; `ln' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `ln'.
+$END
+
+$BUILTIN disk-usage
+$DOCNAME disk_usage
+$FUNCTION disk_usage_builtin
+$SHORT_DOC disk-usage [arg ...]
+Clearer name for `du'.
+
+Runs the real `du' command with the given arguments.  bbash additive
+builtin; `du' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `du'.
+$END
+
+$BUILTIN disk-free
+$DOCNAME disk_free
+$FUNCTION disk_free_builtin
+$SHORT_DOC disk-free [arg ...]
+Clearer name for `df'.
+
+Runs the real `df' command with the given arguments.  bbash additive
+builtin; `df' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `df'.
+$END
+
+$BUILTIN processes
+$FUNCTION processes_builtin
+$SHORT_DOC processes [arg ...]
+Clearer name for `ps'.
+
+Runs the real `ps' command with the given arguments.  bbash additive
+builtin; `ps' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `ps'.
+$END
+
+$BUILTIN permissions
+$FUNCTION permissions_builtin
+$SHORT_DOC permissions [arg ...]
+Clearer name for `chmod'.
+
+Runs the real `chmod' command with the given arguments.  bbash additive
+builtin; `chmod' itself is completely unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `chmod'.
+$END
+
+$BUILTIN stop-process
+$DOCNAME stop_process
+$FUNCTION stop_process_builtin
+$SHORT_DOC stop-process [arg ...]
+Clearer name for `kill'.
+
+Runs the shell's own `kill' (so job specs like %1 still work) with the
+given arguments.  bbash additive builtin; `kill' itself is completely
+unchanged and still works normally.
+
+Exit Status:
+Returns the exit status of `kill'.
+$END
+
 #include <config.h>
 
 #if defined (HAVE_UNISTD_H)
@@ -166,4 +242,40 @@ int
 word_count_builtin (WORD_LIST *list)
 {
   return run_real_command ("wc", list);
+}
+
+int
+link_builtin (WORD_LIST *list)
+{
+  return run_real_command ("ln", list);
+}
+
+int
+disk_usage_builtin (WORD_LIST *list)
+{
+  return run_real_command ("du", list);
+}
+
+int
+disk_free_builtin (WORD_LIST *list)
+{
+  return run_real_command ("df", list);
+}
+
+int
+processes_builtin (WORD_LIST *list)
+{
+  return run_real_command ("ps", list);
+}
+
+int
+permissions_builtin (WORD_LIST *list)
+{
+  return run_real_command ("chmod", list);
+}
+
+int
+stop_process_builtin (WORD_LIST *list)
+{
+  return run_real_command ("kill", list);
 }
