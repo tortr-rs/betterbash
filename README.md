@@ -56,6 +56,15 @@ exactly as before.
 | `make-dir`     | `mkdir`      |
 | `ownership`    | `chown`      |
 | `word-count`   | `wc`         |
+| `link`         | `ln`         |
+| `disk-usage`   | `du`         |
+| `disk-free`    | `df`         |
+| `processes`    | `ps`         |
+| `permissions`  | `chmod`      |
+| `stop-process` | `kill`       |
+
+`stop-process` dispatches to the shell's own `kill` builtin (not an
+external binary), so job specs like `%1` still work as expected.
 
 ```sh
 list -la /tmp
@@ -112,7 +121,7 @@ regex engine — the interface is simpler, the matching power isn't reduced.
 | `--ignore-case` | `-i` | case-insensitive match |
 | `--invert` | `-v` | show non-matching lines |
 | `--count` | `-c` | show only a per-file match count |
-| `--line-numbers` | `-n` | show line numbers (**on by default**)  YOURSELF FROM COMMITS I DONT WANT YOU AS A CO AUTHOR|
+| `--line-numbers` | `-n` | show line numbers (**on by default**) |
 | `--no-line-numbers` | | turn line numbers off |
 | `--files-only` | `-l` | list matching filenames only |
 | `--context <n>` | `-C` | show N lines of context around each match |
